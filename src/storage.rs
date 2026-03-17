@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
-use duckdb::{params, Connection};
+use duckdb::{Connection, params};
 use std::path::{Path, PathBuf};
 
 pub struct EventStore {
     conn: Connection,
     duckdb_path: String,
     export_parquet_path: Option<String>,
+    batch_size: usize,
+    pending: Vec<OwnedStoredEvent>,
 }
 
 pub struct StoredEvent<'a> {
@@ -22,11 +24,47 @@ pub struct StoredEvent<'a> {
     pub offchain_hint: &'a str,
 }
 
+struct OwnedStoredEvent {
+    source: String,
+    block_number: u64,
+    log_index: u64,
+    tx_hash: String,
+    address: String,
+    topic0: String,
+    topic1: String,
+    topic2: String,
+    topic3: String,
+    tracked_tokens: usize,
+    offchain_hint: String,
+}
+
+impl OwnedStoredEvent {
+    fn from_borrowed(ev: &StoredEvent<'_>) -> Self {
+        Self {
+            source: ev.source.to_string(),
+            block_number: ev.block_number,
+            log_index: ev.log_index,
+            tx_hash: ev.tx_hash.to_string(),
+            address: ev.address.to_string(),
+            topic0: ev.topic0.to_string(),
+            topic1: ev.topic1.to_string(),
+            topic2: ev.topic2.to_string(),
+            topic3: ev.topic3.to_string(),
+            tracked_tokens: ev.tracked_tokens,
+            offchain_hint: ev.offchain_hint.to_string(),
+        }
+    }
+}
+
 impl EventStore {
     pub fn from_env() -> Result<Option<Self>> {
         let duckdb_path = std::env::var("EXPORT_DUCKDB_PATH").ok();
         let parquet_path = std::env::var("EXPORT_PARQUET_PATH").ok();
         let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+        let batch_size = std::env::var("STORAGE_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(200);
 
         if duckdb_path.is_none() && parquet_path.is_none() {
             return Ok(None);
@@ -72,6 +110,8 @@ impl EventStore {
             conn,
             duckdb_path: duckdb_full_path_str,
             export_parquet_path,
+            batch_size: batch_size.max(1),
+            pending: Vec::new(),
         }))
     }
 
@@ -83,9 +123,25 @@ impl EventStore {
         self.export_parquet_path.as_deref()
     }
 
-    pub fn insert_event(&self, ev: &StoredEvent<'_>) -> Result<()> {
+    pub fn insert_event(&mut self, ev: &StoredEvent<'_>) -> Result<()> {
+        self.pending.push(OwnedStoredEvent::from_borrowed(ev));
+        if self.pending.len() >= self.batch_size {
+            self.flush_pending()?;
+        }
+        Ok(())
+    }
+
+    pub fn flush_pending(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+
         self.conn
-            .execute(
+            .execute_batch("BEGIN TRANSACTION;")
+            .context("failed starting storage transaction")?;
+
+        for ev in &self.pending {
+            if let Err(err) = self.conn.execute(
                 "
                 INSERT INTO matched_events
                     (source, block_number, log_index, tx_hash, address, topic0, topic1, topic2, topic3, tracked_tokens, offchain_hint)
@@ -105,13 +161,22 @@ impl EventStore {
                     ev.tracked_tokens as i64,
                     ev.offchain_hint,
                 ],
-            )
-            .context("failed inserting matched event")?;
+            ) {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                return Err(err).context("failed inserting matched event");
+            }
+        }
 
+        self.conn
+            .execute_batch("COMMIT;")
+            .context("failed committing storage transaction")?;
+        self.pending.clear();
         Ok(())
     }
 
-    pub fn finalize(self) -> Result<()> {
+    pub fn finalize(mut self) -> Result<()> {
+        self.flush_pending()?;
+
         if let Some(path) = self.export_parquet_path {
             let escaped = path.replace('\'', "''");
             let sql = format!(
