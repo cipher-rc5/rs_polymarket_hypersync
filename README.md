@@ -95,6 +95,7 @@ Offchain enrichment:
 - `RTDS_PRINT_UPDATES` (`true`/`false`, default `false`)
 - `ENABLE_RTDS_STRICT_TLS` (`true`/`false`, default `true`)
 - `RTDS_LOG_TLS_DETAILS` (`true`/`false`, default `true`)
+- `RTDS_CERT_SHA256_ALLOWLIST` (optional CSV of SHA-256 fingerprints; fail-closed when set)
 
 Persistence / export:
 

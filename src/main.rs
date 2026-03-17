@@ -184,6 +184,10 @@ async fn main() -> Result<()> {
             "no"
         }
     );
+    println!(
+        "rtds tls pins:  {}",
+        offchain.config().rtds_cert_sha256_allowlist.len()
+    );
     println!("follow tail:    {}", if follow_tail { "yes" } else { "no" });
     if let Some(v) = to_block_excl {
         println!("to block excl:  {}", v);
@@ -396,15 +400,15 @@ async fn main() -> Result<()> {
                         if offchain.config().enable_http {
                             let t0 = topic_u256_to_decimal(&topic1);
                             let t1 = topic_u256_to_decimal(&topic2);
-                            if let Some(token_id) = t0 {
-                                if let Some(price) = offchain.fetch_last_trade_price(&token_id).await? {
-                                    offchain_hint.push_str(&format!("token0_price={price} "));
-                                }
+                            if let Some(token_id) = t0
+                                && let Some(price) = offchain.fetch_last_trade_price(&token_id).await?
+                            {
+                                offchain_hint.push_str(&format!("token0_price={price} "));
                             }
-                            if let Some(token_id) = t1 {
-                                if let Some(price) = offchain.fetch_last_trade_price(&token_id).await? {
-                                    offchain_hint.push_str(&format!("token1_price={price}"));
-                                }
+                            if let Some(token_id) = t1
+                                && let Some(price) = offchain.fetch_last_trade_price(&token_id).await?
+                            {
+                                offchain_hint.push_str(&format!("token1_price={price}"));
                             }
                         }
                     } else if topic0_hex == order_filled_topic {
@@ -468,7 +472,7 @@ async fn main() -> Result<()> {
 
         if matched_in_batch == 0 {
             batches_without_matches += 1;
-            if batches_without_matches % 50 == 0 {
+            if batches_without_matches.is_multiple_of(50) {
                 println!("  -- progress next_block: {}", response.next_block);
             }
         } else {

@@ -36,6 +36,7 @@ pub struct OffchainConfig {
     pub rtds_print_updates: bool,
     pub rtds_strict_tls: bool,
     pub rtds_log_tls_details: bool,
+    pub rtds_cert_sha256_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +74,7 @@ impl OffchainConfig {
             rtds_print_updates: env_bool("RTDS_PRINT_UPDATES", false),
             rtds_strict_tls: env_bool("ENABLE_RTDS_STRICT_TLS", true),
             rtds_log_tls_details: env_bool("RTDS_LOG_TLS_DETAILS", true),
+            rtds_cert_sha256_allowlist: parse_csv_env("RTDS_CERT_SHA256_ALLOWLIST"),
         }
     }
 }
@@ -98,11 +100,15 @@ impl OffchainEnricher {
             return Ok(None);
         }
 
-        let url = format!("{}/markets", self.cfg.gamma_base_url.trim_end_matches('/'));
+        let mut url =
+            Url::parse(&format!("{}/markets", self.cfg.gamma_base_url.trim_end_matches('/')))
+                .context("failed to build gamma markets URL")?;
+        url.query_pairs_mut()
+            .append_pair("condition_ids", condition_id);
+
         let res = self
             .http
             .get(url)
-            .query(&[("condition_ids", condition_id)])
             .send()
             .await
             .context("failed to call gamma markets endpoint")?;
@@ -131,14 +137,17 @@ impl OffchainEnricher {
             }
         }
 
-        let url = format!(
+        let mut url = Url::parse(&format!(
             "{}/last-trade-price",
             self.cfg.clob_base_url.trim_end_matches('/')
-        );
+        ))
+        .context("failed to build clob last-trade-price URL")?;
+        url.query_pairs_mut()
+            .append_pair("token_id", token_id_decimal);
+
         let res = self
             .http
             .get(url)
-            .query(&[("token_id", token_id_decimal)])
             .send()
             .await
             .context("failed to call clob last-trade-price endpoint")?;
@@ -295,8 +304,30 @@ async fn connect_rtds(
             .await
             .with_context(|| format!("failed TLS handshake for RTDS host {host}"))?;
 
+        let cert_sha256 = tls_peer_cert_sha256(&tls)
+            .context("failed reading RTDS peer certificate fingerprint")?;
+
         if cfg.rtds_log_tls_details {
-            log_tls_peer_details(&tls, &host)?;
+            log_tls_peer_details(&host, cert_sha256.as_deref());
+        }
+
+        if !cfg.rtds_cert_sha256_allowlist.is_empty() {
+            let Some(actual) = cert_sha256.as_deref() else {
+                anyhow::bail!(
+                    "RTDS certificate allowlist is configured but peer certificate is missing"
+                );
+            };
+
+            let allowed = cfg
+                .rtds_cert_sha256_allowlist
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(actual));
+            if !allowed {
+                anyhow::bail!(
+                    "RTDS peer cert sha256 {} is not in RTDS_CERT_SHA256_ALLOWLIST",
+                    actual
+                );
+            }
         }
 
         if !cfg.rtds_strict_tls {
@@ -313,24 +344,23 @@ async fn connect_rtds(
     }
 }
 
-fn log_tls_peer_details(
-    tls: &tokio_native_tls::TlsStream<TcpStream>,
-    host: &str,
-) -> Result<()> {
+fn tls_peer_cert_sha256(tls: &tokio_native_tls::TlsStream<TcpStream>) -> Result<Option<String>> {
     let cert_fingerprint = tls
         .get_ref()
         .peer_certificate()
         .context("failed reading RTDS peer certificate")?
         .and_then(|cert| cert.to_der().ok())
-        .map(|der| sha256_hex(&der))
-        .unwrap_or_else(|| "none".to_string());
+        .map(|der| sha256_hex(&der));
 
+    Ok(cert_fingerprint)
+}
+
+fn log_tls_peer_details(host: &str, cert_fingerprint: Option<&str>) {
     println!(
         "[RTDS] tls host={} cert_sha256={}",
-        host, cert_fingerprint
+        host,
+        cert_fingerprint.unwrap_or("none")
     );
-
-    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -372,4 +402,17 @@ fn env_bool(key: &str, default: bool) -> bool {
         .ok()
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
         .unwrap_or(default)
+}
+
+fn parse_csv_env(key: &str) -> Vec<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
