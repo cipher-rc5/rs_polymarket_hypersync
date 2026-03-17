@@ -27,6 +27,19 @@ This repository is a Rust CLI that streams Polymarket onchain logs from HyperSyn
 - Keep event topic/address constants in `src/contracts.rs`, not inline.
 - Use `anyhow::Result` and add context to external I/O/network failures.
 - Preserve current output style: concise status lines and matched-event lines.
+- Write strictly idiomatic Rust and prefer established Rust patterns over custom style.
+- Target Rust edition `2024` and Rust toolchain `1.93` for all code changes.
+
+## External reference specifications
+
+Agents should consult these documents to align implementation details and behavior:
+
+- Polymarket LLM + API guidance: `https://docs.polymarket.com/llms.txt`
+- Polymarket RTDS websocket docs: `https://docs.polymarket.com/market-data/websocket/rtds.md`
+- DuckDB Rust client docs: `https://duckdb.org/docs/stable/clients/rust`
+- Parquet Rust crate docs: `https://docs.rs/parquet/latest/parquet`
+- fastwebsockets repository/docs: `https://github.com/denoland/fastwebsockets`
+- Rust idioms and patterns: `https://rust-unofficial.github.io/patterns/idioms`
 
 ## Performance and output
 

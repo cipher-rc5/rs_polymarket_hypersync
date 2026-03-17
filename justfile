@@ -7,6 +7,13 @@ default:
 check:
   cargo check
 
+# Strict local quality gate.
+check-strict:
+  cargo fmt -- --check
+  cargo check
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test
+
 # Quickstart run for recent data (best default for day-to-day use).
 run: run-recent
 

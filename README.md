@@ -31,8 +31,23 @@ Default HyperSync endpoint: `https://137.hypersync.xyz`
 
 ## Requirements
 
-- Rust toolchain
+- Rust toolchain `1.93` (edition `2024`)
 - `ENVIO_API_TOKEN` (required)
+
+## Agent compliance checklist
+
+For contributors using coding agents (or reviewing agent-generated changes), keep the following aligned with repository policy:
+
+- Use strictly idiomatic Rust.
+- Target Rust edition `2024`.
+- Target Rust toolchain `1.93` (also enforced in `Cargo.toml` via `rust-version`).
+- Refer to the project specification sources before implementing behavior-sensitive changes:
+  - `https://docs.polymarket.com/llms.txt`
+  - `https://docs.polymarket.com/market-data/websocket/rtds.md`
+  - `https://duckdb.org/docs/stable/clients/rust`
+  - `https://docs.rs/parquet/latest/parquet`
+  - `https://github.com/denoland/fastwebsockets`
+  - `https://rust-unofficial.github.io/patterns/idioms`
 
 Create `.env` (or use shell env):
 
@@ -55,6 +70,21 @@ just run
 
 `just run` defaults to a recent bounded window so you see real data quickly.
 
+## CI quality gates
+
+This repository enforces Rust quality checks in GitHub Actions (`.github/workflows/ci.yml`):
+
+- `cargo fmt -- --check`
+- `cargo check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test`
+
+Run the same checks locally with:
+
+```bash
+just check-strict
+```
+
 ## Environment variables
 
 Core:
@@ -65,6 +95,14 @@ Core:
 - `FROM_BLOCK` (optional; default in `src/main.rs`)
 - `TO_BLOCK_EXCL` (optional; if unset and `FOLLOW_TAIL=false`, app uses `height + 1`)
 - `FOLLOW_TAIL` (`true`/`false`, default `false`)
+
+Runtime resilience / flow control:
+
+- `IO_TIMEOUT_MS` (default `15000`)
+- `STREAM_RETRY_MAX_ATTEMPTS` (default `6`)
+- `STREAM_RETRY_BASE_DELAY_MS` (default `500`)
+- `STREAM_RETRY_MAX_DELAY_MS` (default `10000`)
+- `PROGRESS_LOG_EVERY_BATCHES` (default `50`)
 
 Filtering toggles:
 
@@ -96,12 +134,21 @@ Offchain enrichment:
 - `ENABLE_RTDS_STRICT_TLS` (`true`/`false`, default `true`)
 - `RTDS_LOG_TLS_DETAILS` (`true`/`false`, default `true`)
 - `RTDS_CERT_SHA256_ALLOWLIST` (optional CSV of SHA-256 fingerprints; fail-closed when set)
+- `HTTP_TIMEOUT_MS` (default `4000`)
+- `HTTP_RETRY_MAX_ATTEMPTS` (default `3`)
+- `HTTP_RETRY_BASE_DELAY_MS` (default `150`)
+- `HTTP_RETRY_MAX_DELAY_MS` (default `2000`)
+- `RTDS_RETRY_MAX_ATTEMPTS` (default `50`)
+- `RTDS_RETRY_BASE_DELAY_MS` (default `500`)
+- `RTDS_RETRY_MAX_DELAY_MS` (default `10000`)
+- `ENRICHMENT_MAX_IN_FLIGHT` (default `16`; bounded prefetch concurrency)
 
 Persistence / export:
 
 - `EXPORT_DUCKDB_PATH` (optional path to DuckDB file)
 - `EXPORT_PARQUET_PATH` (optional path for Parquet export at end of run)
 - `DATA_DIR` (optional base directory for storage output, default `./data`)
+- `STORAGE_BATCH_SIZE` (default `200`; buffered insert batch size)
 
 Storage path behavior:
 
@@ -172,6 +219,25 @@ just run-condition-seeded 0x7b49294de4f325f82b071631ed8222ac5bba5ce95948018aff5a
 - Too much output
   - Set a tighter `TO_BLOCK_EXCL`.
   - Disable fills/matches with `INCLUDE_ORDER_FILLED=false` / `INCLUDE_ORDERS_MATCHED=false`.
+
+## Operator runbook
+
+- Stream repeatedly reconnecting
+  - Check `ENVIO_HYPERSYNC_URL`, API token validity, and network reachability.
+  - Increase `IO_TIMEOUT_MS` for slow networks.
+  - Tune stream retry/backoff with `STREAM_RETRY_*` env vars.
+- RTDS reconnect storms
+  - Verify `POLY_RTDS_URL` and TLS settings.
+  - Keep `ENABLE_RTDS_STRICT_TLS=true` unless debugging in a controlled environment.
+  - If pinning is enabled, confirm `RTDS_CERT_SHA256_ALLOWLIST` fingerprints are current.
+- Enrichment lag under load
+  - Increase `ENRICHMENT_MAX_IN_FLIGHT` cautiously.
+  - Reduce retry aggressiveness via `HTTP_RETRY_*` and check endpoint health.
+- Storage bottlenecks
+  - Increase `STORAGE_BATCH_SIZE` to reduce insert overhead.
+  - Ensure `DATA_DIR` is on a disk with sufficient write throughput.
+- Graceful shutdown
+  - Press `Ctrl+C`; the process finalizes buffered storage and exits.
 
 ## Development
 
