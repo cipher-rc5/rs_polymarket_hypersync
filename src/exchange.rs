@@ -160,3 +160,76 @@ pub fn parse_seed_env() -> Result<Option<String>> {
         Err(err) => Err(err).context("failed reading MARKET_TOKEN_IDS env var"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExchangeTracker, extract_first_word_hex, normalize_condition_id_word, normalize_topic_word,
+        topic_u256_to_decimal,
+    };
+
+    fn abi_words(words: &[u128]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(words.len() * 32);
+        for word in words {
+            out.extend_from_slice(&[0u8; 16]);
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn normalize_topic_word_left_pads_to_32_bytes() {
+        let topic = "0x1234";
+        let normalized = normalize_topic_word(topic);
+        assert_eq!(normalized.len(), 64);
+        assert!(normalized.ends_with("1234"));
+    }
+
+    #[test]
+    fn normalize_condition_id_word_rejects_too_long_value() {
+        let too_long = format!("0x{}", "a".repeat(65));
+        assert!(normalize_condition_id_word(&too_long).is_err());
+    }
+
+    #[test]
+    fn extract_first_word_hex_handles_short_and_valid_data() {
+        assert!(extract_first_word_hex(&[1u8; 31]).is_none());
+        let data = vec![0xabu8; 64];
+        let first = extract_first_word_hex(&data).expect("first word");
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn topic_u256_to_decimal_converts_hex_word() {
+        let topic = "0x0000000000000000000000000000000000000000000000000000000000000015";
+        assert_eq!(topic_u256_to_decimal(topic).as_deref(), Some("21"));
+    }
+
+    #[test]
+    fn order_filled_matching_and_short_payload() {
+        let mut tracker = ExchangeTracker::from_seed_csv(Some("0x2a")).expect("seed");
+        tracker.register_token_pair("0x2a", "0x2b");
+
+        let matching = abi_words(&[0x2a, 0x777]);
+        let non_matching = abi_words(&[0x999, 0x998]);
+        let short = vec![0u8; 31];
+
+        assert!(tracker.matches_order_filled(&matching));
+        assert!(!tracker.matches_order_filled(&non_matching));
+        assert!(!tracker.matches_order_filled(&short));
+    }
+
+    #[test]
+    fn orders_matched_matching_and_short_payload() {
+        let tracker = ExchangeTracker::from_seed_csv(Some("0xdead")).expect("seed");
+
+        let matching = abi_words(&[0xdead, 0xbeef]);
+        let non_matching = abi_words(&[0x111, 0x222]);
+        let short = vec![0u8; 1];
+
+        assert!(tracker.matches_orders_matched(&matching));
+        assert!(!tracker.matches_orders_matched(&non_matching));
+        assert!(!tracker.matches_orders_matched(&short));
+    }
+}
