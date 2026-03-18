@@ -29,4 +29,6 @@ Thumbs.db
 # IDE/editor
 .idea/
 .vscode/
-_dev
+
+# Local agent/reference notes (never commit)
+/_dev/

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 
-pub const DEFAULT_CONDITION_ID: &str =
-    "0x7b49294de4f325f82b071631ed8222ac5bba5ce95948018aff5a3c2ef6c5e595";
 pub const DEFAULT_FROM_BLOCK: u64 = 68_000_000;
+pub const DEFAULT_AUTO_CONDITION_LOOKBACK_HOURS: u64 = 24;
+pub const DEFAULT_BLOCKS_PER_DAY: u64 = 172_800;
 
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
@@ -16,10 +16,11 @@ pub struct AppConfig {
     pub api_token: String,
     pub hypersync_url: Option<String>,
     pub polygon_rpc_url: Option<String>,
-    pub condition_id: String,
-    pub from_block: u64,
+    pub condition_id: Option<String>,
+    pub from_block: Option<u64>,
     pub to_block_excl: Option<u64>,
     pub follow_tail: bool,
+    pub auto_condition_lookback_hours: u64,
     pub include_exchange_logs: bool,
     pub include_order_filled: bool,
     pub include_orders_matched: bool,
@@ -41,11 +42,12 @@ impl AppConfig {
             api_token,
             hypersync_url: std::env::var("ENVIO_HYPERSYNC_URL").ok(),
             polygon_rpc_url: std::env::var("POLYGON_RPC_URL").ok(),
-            condition_id: std::env::var("CONDITION_ID")
-                .unwrap_or_else(|_| DEFAULT_CONDITION_ID.to_string()),
-            from_block: env_u64("FROM_BLOCK")?.unwrap_or(DEFAULT_FROM_BLOCK),
+            condition_id: env_non_empty("CONDITION_ID"),
+            from_block: env_u64("FROM_BLOCK")?,
             to_block_excl: env_u64("TO_BLOCK_EXCL")?,
             follow_tail: env_bool("FOLLOW_TAIL", false),
+            auto_condition_lookback_hours: env_u64("AUTO_CONDITION_LOOKBACK_HOURS")?
+                .unwrap_or(DEFAULT_AUTO_CONDITION_LOOKBACK_HOURS),
             include_exchange_logs,
             include_order_filled: env_bool("INCLUDE_ORDER_FILLED", true),
             include_orders_matched: env_bool("INCLUDE_ORDERS_MATCHED", true),
@@ -91,6 +93,9 @@ impl AppConfig {
         if self.progress_log_every_batches == 0 {
             anyhow::bail!("PROGRESS_LOG_EVERY_BATCHES must be >= 1");
         }
+        if self.auto_condition_lookback_hours == 0 {
+            anyhow::bail!("AUTO_CONDITION_LOOKBACK_HOURS must be >= 1");
+        }
         if !self.include_exchange_logs && (self.include_order_filled || self.include_orders_matched)
         {
             anyhow::bail!(
@@ -99,6 +104,13 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn env_bool(key: &str, default: bool) -> bool {

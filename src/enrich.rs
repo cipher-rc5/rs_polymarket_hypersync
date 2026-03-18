@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Semaphore};
@@ -54,6 +55,10 @@ pub struct MarketMetadata {
     pub slug: String,
     #[serde(default)]
     pub outcomes: String,
+    #[serde(default, alias = "conditionId", alias = "condition_id")]
+    pub condition_id: String,
+    #[serde(default, alias = "startDate", alias = "start_date")]
+    pub start_date: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +216,57 @@ impl OffchainEnricher {
         Ok(Some(body.price))
     }
 
+    pub async fn fetch_recent_market(&self, lookback_hours: u64) -> Result<Option<MarketMetadata>> {
+        if !self.cfg.enable_http {
+            return Ok(None);
+        }
+
+        let mut url = Url::parse(&format!(
+            "{}/markets",
+            self.cfg.gamma_base_url.trim_end_matches('/')
+        ))
+        .context("failed to build gamma markets URL")?;
+
+        let start_date_min = rfc3339_now_minus_hours(lookback_hours)
+            .context("failed to build lookback timestamp")?;
+
+        url.query_pairs_mut()
+            .append_pair("active", "true")
+            .append_pair("closed", "false")
+            .append_pair("archived", "false")
+            .append_pair("order", "volume")
+            .append_pair("ascending", "false")
+            .append_pair("limit", "20")
+            .append_pair("start_date_min", &start_date_min);
+
+        let res = retry_async(self.cfg.http_retry.clone(), "gamma recent markets", || {
+            let client = self.http.clone();
+            let req_url = url.clone();
+            let timeout_ms = self.cfg.http_timeout_ms;
+            Box::pin(async move {
+                timeout(
+                    Duration::from_millis(timeout_ms),
+                    client.get(req_url).send(),
+                )
+                .await
+                .context("gamma recent markets request timed out")?
+                .context("failed to call gamma recent markets endpoint")
+            })
+        })
+        .await?;
+
+        if !res.status().is_success() {
+            return Ok(None);
+        }
+
+        let body = res
+            .json::<Vec<MarketMetadata>>()
+            .await
+            .context("failed to decode gamma recent markets response")?;
+
+        Ok(body.into_iter().find(|m| !m.condition_id.trim().is_empty()))
+    }
+
     pub async fn cached_last_trade_price(&self, token_id_decimal: &str) -> Option<String> {
         let cache = self.token_price_cache.lock().await;
         cache.get(token_id_decimal).cloned()
@@ -248,6 +304,14 @@ impl OffchainEnricher {
             }
         }))
     }
+}
+
+fn rfc3339_now_minus_hours(hours: u64) -> Result<String> {
+    let now = OffsetDateTime::now_utc();
+    let delta = TimeDuration::hours(hours as i64);
+    let ts = now - delta;
+    ts.format(&Rfc3339)
+        .context("failed formatting RFC3339 timestamp")
 }
 
 async fn run_rtds_forever(cfg: OffchainConfig) -> Result<()> {

@@ -24,6 +24,17 @@ pub fn topic_u256_to_decimal(topic: &str) -> Option<String> {
     BigUint::parse_bytes(compact.as_bytes(), 16).map(|v| v.to_str_radix(10))
 }
 
+pub fn decode_first_two_asset_ids_decimal(data: &[u8]) -> Option<(String, String)> {
+    let words = split_abi_words(data);
+    if words.len() < 2 {
+        return None;
+    }
+
+    let maker = BigUint::from_bytes_be(words[0]).to_str_radix(10);
+    let taker = BigUint::from_bytes_be(words[1]).to_str_radix(10);
+    Some((maker, taker))
+}
+
 fn compact_u256_hex_from_word(word: &[u8]) -> String {
     let first_nonzero = word.iter().position(|b| *b != 0).unwrap_or(word.len());
     if first_nonzero == word.len() {
@@ -164,8 +175,8 @@ pub fn parse_seed_env() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExchangeTracker, extract_first_word_hex, normalize_condition_id_word, normalize_topic_word,
-        topic_u256_to_decimal,
+        ExchangeTracker, decode_first_two_asset_ids_decimal, extract_first_word_hex,
+        normalize_condition_id_word, normalize_topic_word, topic_u256_to_decimal,
     };
 
     fn abi_words(words: &[u128]) -> Vec<u8> {
@@ -204,6 +215,16 @@ mod tests {
     fn topic_u256_to_decimal_converts_hex_word() {
         let topic = "0x0000000000000000000000000000000000000000000000000000000000000015";
         assert_eq!(topic_u256_to_decimal(topic).as_deref(), Some("21"));
+    }
+
+    #[test]
+    fn decode_first_two_asset_ids_decimal_handles_valid_and_short() {
+        let data = abi_words(&[42, 1337]);
+        let ids = decode_first_two_asset_ids_decimal(&data).expect("decoded ids");
+        assert_eq!(ids.0, "42");
+        assert_eq!(ids.1, "1337");
+
+        assert!(decode_first_two_asset_ids_decimal(&[0u8; 10]).is_none());
     }
 
     #[test]

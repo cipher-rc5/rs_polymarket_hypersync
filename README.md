@@ -91,8 +91,9 @@ Core:
 
 - `ENVIO_API_TOKEN` (required)
 - `ENVIO_HYPERSYNC_URL` (optional; defaults to Polygon HyperSync)
-- `CONDITION_ID` (optional; defaults to value in `src/main.rs`)
-- `FROM_BLOCK` (optional; default in `src/main.rs`)
+- `CONDITION_ID` (optional; if unset, app auto-selects a recent active market from the last 24h)
+- `AUTO_CONDITION_LOOKBACK_HOURS` (default `24`; window used when auto-selecting `CONDITION_ID`)
+- `FROM_BLOCK` (optional; if unset, defaults to approximately last 24h from current chain height)
 - `TO_BLOCK_EXCL` (optional; if unset and `FOLLOW_TAIL=false`, app uses `height + 1`)
 - `FOLLOW_TAIL` (`true`/`false`, default `false`)
 
@@ -213,7 +214,7 @@ just run-condition-seeded 0x7b49294de4f325f82b071631ed8222ac5bba5ce95948018aff5a
   - Ensure `.env` exists and has `ENVIO_API_TOKEN`, or export it in shell.
 - No logs returned
   - Expand block range.
-  - Verify `CONDITION_ID` is correct.
+  - Verify `CONDITION_ID` is correct (or set it explicitly instead of auto-selection).
   - Confirm exchange logs are enabled (`INCLUDE_EXCHANGE_LOGS=true`).
   - If no `TokenRegistered` in your window, seed `MARKET_TOKEN_IDS`.
 - Too much output

@@ -17,7 +17,7 @@ check-strict:
 # Quickstart run for recent data (best default for day-to-day use).
 run: run-recent
 
-# Full run using defaults from .env/.env.example and src/main.rs constants.
+# Full run using values from .env/.env.example.
 run-full:
   cargo run --quiet
 
@@ -27,7 +27,7 @@ run-enriched lookback="20000":
 
 # Run a recent bounded window.
 # Tries to compute `from` as `head - lookback` using POLYGON_RPC_URL (or polygon-rpc.com),
-# and falls back to block 84,000,000 if RPC probing fails.
+# and falls back to app defaults (auto condition + last ~24h) if RPC probing fails.
 run-recent lookback="20000":
   #!/usr/bin/env bash
   set -euo pipefail
@@ -39,8 +39,8 @@ run-recent lookback="20000":
     echo "Running recent window: FROM_BLOCK=$FROM TO_BLOCK_EXCL=$((HEAD + 1))"
     FROM_BLOCK="$FROM" TO_BLOCK_EXCL="$((HEAD + 1))" FOLLOW_TAIL=false cargo run --quiet
   else
-    echo "Could not query head block from RPC; falling back to FROM_BLOCK=84000000"
-    FROM_BLOCK=84000000 FOLLOW_TAIL=false cargo run --quiet
+    echo "Could not query head block from RPC; falling back to app defaults"
+    FOLLOW_TAIL=false cargo run --quiet
   fi
 
 # Historical bounded scan.

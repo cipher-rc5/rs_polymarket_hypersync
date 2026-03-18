@@ -14,7 +14,7 @@ mod exchange;
 mod matcher;
 mod storage;
 
-use config::{AppConfig, RetryPolicy};
+use config::{AppConfig, DEFAULT_BLOCKS_PER_DAY, DEFAULT_FROM_BLOCK, RetryPolicy};
 use contracts::{
     DEFAULT_POLYGON_HYPERSYNC_URL, POLYGON_CHAIN_ID,
     address::{CONDITIONAL_TOKENS, EXCHANGE, NEG_RISK_ADAPTER, NEG_RISK_EXCHANGE},
@@ -26,7 +26,8 @@ use contracts::{
 };
 use enrich::{OffchainConfig, OffchainEnricher};
 use exchange::{
-    ExchangeTracker, normalize_condition_id_word, normalize_topic_word, parse_seed_env,
+    ExchangeTracker, decode_first_two_asset_ids_decimal, normalize_condition_id_word,
+    normalize_topic_word, parse_seed_env,
 };
 use matcher::{CtfTopicMatchers, ctf_matches_condition, normalize_hex, topic_contains_hex};
 use storage::{EventStore, StoredEvent};
@@ -52,17 +53,6 @@ async fn main() -> Result<()> {
     let mut exchange_tracker = ExchangeTracker::from_seed_csv(seed_token_ids.as_deref())?;
     let mut event_store = EventStore::from_env()?;
 
-    if let Some(meta) = offchain
-        .fetch_market_by_condition(&cfg.condition_id)
-        .await?
-    {
-        info!(market_question = %meta.question, "market metadata");
-        info!(market_slug = %meta.slug, "market metadata");
-        if !meta.outcomes.is_empty() {
-            info!(market_outcomes = %meta.outcomes, "market metadata");
-        }
-    }
-
     let mut client_builder = Client::builder().api_token(cfg.api_token.clone());
     if let Some(url) = &cfg.hypersync_url {
         client_builder = client_builder.url(url);
@@ -74,17 +64,44 @@ async fn main() -> Result<()> {
         .build()
         .context("failed to create HyperSync client")?;
 
-    let to_block_excl = resolve_to_block_excl(&cfg, &client).await?;
+    let condition_id = if let Some(v) = cfg.condition_id.clone() {
+        v
+    } else {
+        let recent = offchain
+            .fetch_recent_market(cfg.auto_condition_lookback_hours)
+            .await?
+            .context(
+                "failed to auto-select condition id from recent markets; set CONDITION_ID explicitly",
+            )?;
+        info!(
+            lookback_hours = cfg.auto_condition_lookback_hours,
+            auto_condition_id = %recent.condition_id,
+            auto_market_slug = %recent.slug,
+            auto_market_start_date = %recent.start_date,
+            "auto-selected market from recent window"
+        );
+        recent.condition_id
+    };
+
+    if let Some(meta) = offchain.fetch_market_by_condition(&condition_id).await? {
+        info!(market_question = %meta.question, "market metadata");
+        info!(market_slug = %meta.slug, "market metadata");
+        if !meta.outcomes.is_empty() {
+            info!(market_outcomes = %meta.outcomes, "market metadata");
+        }
+    }
+
+    let (from_block, to_block_excl) = resolve_block_bounds(&cfg, &client).await?;
     let effective_hypersync_url = cfg.effective_hypersync_url(DEFAULT_POLYGON_HYPERSYNC_URL);
     let effective_polygon_rpc = cfg.effective_polygon_rpc(DEFAULT_POLYGON_HYPERSYNC_URL);
 
     info!("querying Polygon via HyperSync");
-    info!(condition_id = %cfg.condition_id, "runtime");
+    info!(condition_id = %condition_id, "runtime");
     info!(ctf_contract = %CONDITIONAL_TOKENS, "runtime");
     info!(neg_risk = %NEG_RISK_ADAPTER, "runtime");
     info!(exchange = %EXCHANGE, "runtime");
     info!(neg_exchange = %NEG_RISK_EXCHANGE, "runtime");
-    info!(from_block = cfg.from_block, "runtime");
+    info!(from_block, "runtime");
     info!(hypersync_url = %effective_hypersync_url, "runtime");
     info!(polygon_rpc = %effective_polygon_rpc, "runtime");
     info!(include_exchange_logs = cfg.include_exchange_logs, "runtime");
@@ -144,14 +161,13 @@ async fn main() -> Result<()> {
     let neg_risk_adapter_hex = normalize_hex(NEG_RISK_ADAPTER);
     let exchange_hex = normalize_hex(EXCHANGE);
     let neg_risk_exchange_hex = normalize_hex(NEG_RISK_EXCHANGE);
-    let condition_id_hex = cfg
-        .condition_id
+    let condition_id_hex = condition_id
         .strip_prefix("0x")
-        .unwrap_or(cfg.condition_id.as_str())
+        .unwrap_or(condition_id.as_str())
         .to_ascii_lowercase();
-    let condition_id_word = normalize_condition_id_word(&cfg.condition_id)?;
+    let condition_id_word = normalize_condition_id_word(&condition_id)?;
 
-    let mut next_from_block = cfg.from_block;
+    let mut next_from_block = from_block;
     let mut stats = RunStats {
         total_ctf: 0,
         total_neg_risk: 0,
@@ -272,6 +288,8 @@ async fn main() -> Result<()> {
                                             }
                                             exchange_tracker.register_token_pair(&topic1, &topic2);
 
+                                            append_registered_ids_hint(&mut offchain_hint, &topic1, &topic2);
+
                                             if offchain.config().enable_http {
                                                 enrich_token_pair_hint(&mut offchain_hint, &offchain, &topic1, &topic2)
                                                     .await;
@@ -282,12 +300,14 @@ async fn main() -> Result<()> {
                                             {
                                                 continue;
                                             }
+                                            append_asset_ids_hint(&mut offchain_hint, data);
                                         } else if topic0_hex == orders_matched_topic {
                                             if !cfg.include_orders_matched
                                                 || !exchange_tracker.matches_orders_matched(data)
                                             {
                                                 continue;
                                             }
+                                            append_asset_ids_hint(&mut offchain_hint, data);
                                         } else {
                                             continue;
                                         }
@@ -392,24 +412,40 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
-async fn resolve_to_block_excl(cfg: &AppConfig, client: &Client) -> Result<Option<u64>> {
-    if cfg.follow_tail {
-        return Ok(cfg.to_block_excl);
-    }
+async fn resolve_block_bounds(cfg: &AppConfig, client: &Client) -> Result<(u64, Option<u64>)> {
+    let needs_height =
+        cfg.from_block.is_none() || (!cfg.follow_tail && cfg.to_block_excl.is_none());
 
-    if let Some(v) = cfg.to_block_excl {
-        return Ok(Some(v));
-    }
+    let height = if needs_height {
+        Some(
+            timeout(
+                Duration::from_millis(cfg.io_timeout_ms),
+                client.get_height(),
+            )
+            .await
+            .context("timed out fetching chain height")?
+            .context("failed to fetch chain height")?,
+        )
+    } else {
+        None
+    };
 
-    let height = timeout(
-        Duration::from_millis(cfg.io_timeout_ms),
-        client.get_height(),
-    )
-    .await
-    .context("timed out fetching chain height")?
-    .context("failed to fetch chain height")?;
+    let from_block = cfg.from_block.unwrap_or_else(|| {
+        height
+            .unwrap_or(DEFAULT_FROM_BLOCK)
+            .saturating_sub(DEFAULT_BLOCKS_PER_DAY)
+    });
 
-    Ok(Some(height + 1))
+    let to_block_excl = if cfg.follow_tail {
+        cfg.to_block_excl
+    } else {
+        Some(
+            cfg.to_block_excl
+                .unwrap_or_else(|| height.unwrap_or(from_block) + 1),
+        )
+    };
+
+    Ok((from_block, to_block_excl))
 }
 
 fn build_query(from_block: u64, to_block_excl: Option<u64>, cfg: &AppConfig) -> Result<Query> {
@@ -493,6 +529,33 @@ async fn enrich_token_pair_hint(
                 offchain.prefetch_last_trade_price(token_id);
             }
         }
+    }
+}
+
+fn append_registered_ids_hint(offchain_hint: &mut String, token0_topic: &str, token1_topic: &str) {
+    if let Some(token0_id) = exchange::topic_u256_to_decimal(token0_topic) {
+        if !offchain_hint.is_empty() {
+            offchain_hint.push(' ');
+        }
+        offchain_hint.push_str(&format!("token0_id={token0_id}"));
+    }
+
+    if let Some(token1_id) = exchange::topic_u256_to_decimal(token1_topic) {
+        if !offchain_hint.is_empty() {
+            offchain_hint.push(' ');
+        }
+        offchain_hint.push_str(&format!("token1_id={token1_id}"));
+    }
+}
+
+fn append_asset_ids_hint(offchain_hint: &mut String, data: &[u8]) {
+    if let Some((maker_asset_id, taker_asset_id)) = decode_first_two_asset_ids_decimal(data) {
+        if !offchain_hint.is_empty() {
+            offchain_hint.push(' ');
+        }
+        offchain_hint.push_str(&format!(
+            "maker_id={maker_asset_id} taker_id={taker_asset_id}"
+        ));
     }
 }
 
