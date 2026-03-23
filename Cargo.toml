@@ -13,6 +13,8 @@ dotenvy = "0.15.7"
 
 # Storage and analytics output
 duckdb = { version = "1.4.2", features = ["bundled"] }
+arrow = { version = "57", default-features = false, features = ["ipc"] }
+parquet = { version = "57", default-features = false, features = ["arrow", "zstd"] }
 
 # HyperSync ingestion
 hypersync-client = "1.0.1"
