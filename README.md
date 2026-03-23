@@ -221,6 +221,36 @@ just run-condition-seeded 0x7b49294de4f325f82b071631ed8222ac5bba5ce95948018aff5a
   - Set a tighter `TO_BLOCK_EXCL`.
   - Disable fills/matches with `INCLUDE_ORDER_FILLED=false` / `INCLUDE_ORDERS_MATCHED=false`.
 
+### Offchain past-results query fails with missing params
+
+- Use `curl -G` with `--data-urlencode` to avoid malformed query strings:
+
+```bash
+curl -G "https://polymarket.com/api/past-results" \
+  --data-urlencode "symbol=BTC" \
+  --data-urlencode "variant=fiveminute" \
+  --data-urlencode "assetType=crypto" \
+  --data-urlencode "currentEventStartTime=2026-03-17T23:35:00Z" \
+  --data-urlencode "count=10"
+```
+
+- If you see `Missing required parameters`, re-check for URL typos in `currentEventStartTime` and separators.
+
+### Onchain lookup is slow or shows no matches
+
+- For 5-minute markets, `OrderFilled`/`OrdersMatched` matching depends on tracked token IDs.
+- If your range starts after `TokenRegistered`, seed token IDs from `clobTokenIds`:
+
+```bash
+just run-condition-seeded \
+  0x97d530e766a3a3d37fe5c05bb7fdad433ff1d3920026314c721155a1f87cc27d \
+  84000000 \
+  84360000 \
+  0x7a6848b6d4185e1ef98761399584c076d6568c6871058dff8ebd6c5037d7c33,0x25e0f65ad5de689a3a6fe619ad72b0c3e6fdf6be9f0654aeff220d22acc91704
+```
+
+- If progress still advances with no matches, tighten the window around the market lifecycle (creation, trading, and settlement blocks).
+
 ## Operator runbook
 
 - Stream repeatedly reconnecting
