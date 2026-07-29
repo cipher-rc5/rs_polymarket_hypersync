@@ -59,6 +59,22 @@ pub struct MarketMetadata {
     pub condition_id: String,
     #[serde(default, alias = "startDate", alias = "start_date")]
     pub start_date: String,
+    /// Gamma returns `clobTokenIds` as a JSON-encoded string array of decimal
+    /// token ids (e.g. `"[\"123\", \"456\"]"`). In V2 there is no on-chain
+    /// `TokenRegistered` event, so this is the canonical source for linking a
+    /// `conditionId` to its outcome `tokenId`s.
+    #[serde(default, alias = "clobTokenIds", alias = "clob_token_ids")]
+    pub clob_token_ids: String,
+}
+
+impl MarketMetadata {
+    /// Parses the embedded JSON-encoded `clobTokenIds` string into decimal ids.
+    pub fn parsed_clob_token_ids(&self) -> Vec<String> {
+        if self.clob_token_ids.trim().is_empty() {
+            return Vec::new();
+        }
+        serde_json::from_str::<Vec<String>>(&self.clob_token_ids).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Deserialize)]

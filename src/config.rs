@@ -11,6 +11,29 @@ pub struct RetryPolicy {
     pub max_delay_ms: u64,
 }
 
+/// Tuning for the HyperSync stream, chosen to stay within the server-side
+/// request budget (Envio's free tier is 30 req/min). The defaults are sized for
+/// the *sparse* Polymarket workload here — selective log filters over wide block
+/// ranges — where the request count, not bandwidth, is the bottleneck.
+///
+/// - Low `concurrency` bounds how many requests are in flight at once; the
+///   library's default of 10 exhausts a 30 req/min budget almost instantly.
+/// - A large `batch_size` makes each request cover more ground, so a given block
+///   range is swept in fewer requests. Overshoot is self-correcting server-side.
+///
+/// All three are overridable via env for users on a higher Envio plan.
+#[derive(Clone, Debug)]
+pub struct StreamTuning {
+    pub concurrency: usize,
+    pub batch_size: u64,
+    pub max_batch_size: Option<u64>,
+}
+
+impl StreamTuning {
+    pub const DEFAULT_CONCURRENCY: usize = 2;
+    pub const DEFAULT_BATCH_SIZE: u64 = 20_000;
+}
+
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub api_token: String,
@@ -26,6 +49,7 @@ pub struct AppConfig {
     pub include_orders_matched: bool,
     pub include_neg_risk_logs: bool,
     pub stream_retry: RetryPolicy,
+    pub stream_tuning: StreamTuning,
     pub io_timeout_ms: u64,
     pub progress_log_every_batches: usize,
 }
@@ -57,6 +81,13 @@ impl AppConfig {
                 base_delay_ms: env_u64("STREAM_RETRY_BASE_DELAY_MS")?.unwrap_or(500),
                 max_delay_ms: env_u64("STREAM_RETRY_MAX_DELAY_MS")?.unwrap_or(10_000),
             },
+            stream_tuning: StreamTuning {
+                concurrency: env_usize("STREAM_CONCURRENCY")?
+                    .unwrap_or(StreamTuning::DEFAULT_CONCURRENCY),
+                batch_size: env_u64("STREAM_BATCH_SIZE")?
+                    .unwrap_or(StreamTuning::DEFAULT_BATCH_SIZE),
+                max_batch_size: env_u64("STREAM_MAX_BATCH_SIZE")?,
+            },
             io_timeout_ms: env_u64("IO_TIMEOUT_MS")?.unwrap_or(15_000),
             progress_log_every_batches: env_usize("PROGRESS_LOG_EVERY_BATCHES")?.unwrap_or(50),
         };
@@ -86,6 +117,17 @@ impl AppConfig {
         }
         if self.stream_retry.max_delay_ms < self.stream_retry.base_delay_ms {
             anyhow::bail!("STREAM_RETRY_MAX_DELAY_MS must be >= STREAM_RETRY_BASE_DELAY_MS");
+        }
+        if self.stream_tuning.concurrency == 0 {
+            anyhow::bail!("STREAM_CONCURRENCY must be >= 1");
+        }
+        if self.stream_tuning.batch_size == 0 {
+            anyhow::bail!("STREAM_BATCH_SIZE must be >= 1");
+        }
+        if let Some(max) = self.stream_tuning.max_batch_size
+            && max < self.stream_tuning.batch_size
+        {
+            anyhow::bail!("STREAM_MAX_BATCH_SIZE must be >= STREAM_BATCH_SIZE");
         }
         if self.io_timeout_ms < 100 {
             anyhow::bail!("IO_TIMEOUT_MS must be >= 100");

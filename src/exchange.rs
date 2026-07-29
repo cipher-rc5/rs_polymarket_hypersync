@@ -19,20 +19,16 @@ fn compact_u256_hex(raw_hex: &str) -> String {
     }
 }
 
-pub fn topic_u256_to_decimal(topic: &str) -> Option<String> {
-    let compact = compact_u256_hex(topic);
-    BigUint::parse_bytes(compact.as_bytes(), 16).map(|v| v.to_str_radix(10))
-}
-
-pub fn decode_first_two_asset_ids_decimal(data: &[u8]) -> Option<(String, String)> {
+/// Decodes the second ABI word as `tokenId` from CTF Exchange V2
+/// `OrderFilled` / `OrdersMatched` event data.
+///
+/// V2 layout (non-indexed words):
+/// - `OrderFilled`:    [0]=side, [1]=tokenId, [2]=makerAmountFilled, [3]=takerAmountFilled, [4]=fee, [5]=builder, [6]=metadata
+/// - `OrdersMatched`:  [0]=side, [1]=tokenId, [2]=makerAmountFilled, [3]=takerAmountFilled
+pub fn decode_token_id_decimal(data: &[u8]) -> Option<String> {
     let words = split_abi_words(data);
-    if words.len() < 2 {
-        return None;
-    }
-
-    let maker = BigUint::from_bytes_be(words[0]).to_str_radix(10);
-    let taker = BigUint::from_bytes_be(words[1]).to_str_radix(10);
-    Some((maker, taker))
+    let token_word = words.get(1)?;
+    Some(BigUint::from_bytes_be(token_word).to_str_radix(10))
 }
 
 fn compact_u256_hex_from_word(word: &[u8]) -> String {
@@ -76,53 +72,30 @@ impl ExchangeTracker {
         Ok(Self { tracked_token_ids })
     }
 
-    pub fn register_token_pair(&mut self, token0_topic: &str, token1_topic: &str) {
-        self.tracked_token_ids
-            .insert(compact_u256_hex(token0_topic));
-        self.tracked_token_ids
-            .insert(compact_u256_hex(token1_topic));
+    pub fn insert_token_id_decimal(&mut self, decimal: &str) -> Result<()> {
+        let value = BigUint::parse_bytes(decimal.as_bytes(), 10)
+            .with_context(|| format!("invalid decimal token id: {decimal}"))?;
+        self.tracked_token_ids.insert(value.to_str_radix(16));
+        Ok(())
     }
 
     pub fn tracked_tokens_len(&self) -> usize {
         self.tracked_token_ids.len()
     }
 
-    pub fn matches_order_filled(&self, data: &[u8]) -> bool {
+    /// Matches V2 `OrderFilled` / `OrdersMatched` by checking the single
+    /// `tokenId` ABI word (word index 1).
+    pub fn matches_token_event(&self, data: &[u8]) -> bool {
         if self.tracked_token_ids.is_empty() {
             return false;
         }
 
-        // OrderFilled data words:
-        // [0]=makerAssetId [1]=takerAssetId [2]=makerAmountFilled [3]=takerAmountFilled [4]=fee
         let words = split_abi_words(data);
-        if words.len() < 2 {
+        let Some(token_word) = words.get(1) else {
             return false;
-        }
-
-        let maker_asset = compact_u256_hex_from_word(words[0]);
-        let taker_asset = compact_u256_hex_from_word(words[1]);
-
-        self.tracked_token_ids.contains(&maker_asset)
-            || self.tracked_token_ids.contains(&taker_asset)
-    }
-
-    pub fn matches_orders_matched(&self, data: &[u8]) -> bool {
-        if self.tracked_token_ids.is_empty() {
-            return false;
-        }
-
-        // OrdersMatched data words:
-        // [0]=makerAssetId [1]=takerAssetId [2]=makerAmountFilled [3]=takerAmountFilled
-        let words = split_abi_words(data);
-        if words.len() < 2 {
-            return false;
-        }
-
-        let maker_asset = compact_u256_hex_from_word(words[0]);
-        let taker_asset = compact_u256_hex_from_word(words[1]);
-
-        self.tracked_token_ids.contains(&maker_asset)
-            || self.tracked_token_ids.contains(&taker_asset)
+        };
+        let token_hex = compact_u256_hex_from_word(token_word);
+        self.tracked_token_ids.contains(&token_hex)
     }
 }
 
@@ -175,8 +148,8 @@ pub fn parse_seed_env() -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExchangeTracker, decode_first_two_asset_ids_decimal, extract_first_word_hex,
-        normalize_condition_id_word, normalize_topic_word, topic_u256_to_decimal,
+        ExchangeTracker, decode_token_id_decimal, extract_first_word_hex,
+        normalize_condition_id_word, normalize_topic_word,
     };
 
     fn abi_words(words: &[u128]) -> Vec<u8> {
@@ -212,45 +185,33 @@ mod tests {
     }
 
     #[test]
-    fn topic_u256_to_decimal_converts_hex_word() {
-        let topic = "0x0000000000000000000000000000000000000000000000000000000000000015";
-        assert_eq!(topic_u256_to_decimal(topic).as_deref(), Some("21"));
+    fn decode_token_id_decimal_returns_second_word() {
+        // V2 OrderFilled data: [side=0, tokenId=1337, ...]
+        let data = abi_words(&[0, 1337]);
+        assert_eq!(decode_token_id_decimal(&data).as_deref(), Some("1337"));
+        assert!(decode_token_id_decimal(&[0u8; 10]).is_none());
+        assert!(decode_token_id_decimal(&[0u8; 32]).is_none());
     }
 
     #[test]
-    fn decode_first_two_asset_ids_decimal_handles_valid_and_short() {
-        let data = abi_words(&[42, 1337]);
-        let ids = decode_first_two_asset_ids_decimal(&data).expect("decoded ids");
-        assert_eq!(ids.0, "42");
-        assert_eq!(ids.1, "1337");
+    fn matches_token_event_uses_word_one() {
+        let tracker = ExchangeTracker::from_seed_csv(Some("0x2a")).expect("seed");
 
-        assert!(decode_first_two_asset_ids_decimal(&[0u8; 10]).is_none());
-    }
-
-    #[test]
-    fn order_filled_matching_and_short_payload() {
-        let mut tracker = ExchangeTracker::from_seed_csv(Some("0x2a")).expect("seed");
-        tracker.register_token_pair("0x2a", "0x2b");
-
-        let matching = abi_words(&[0x2a, 0x777]);
-        let non_matching = abi_words(&[0x999, 0x998]);
+        // word[0] = side, word[1] = tokenId
+        let matching = abi_words(&[1, 0x2a]);
+        let non_matching = abi_words(&[0, 0x999]);
         let short = vec![0u8; 31];
 
-        assert!(tracker.matches_order_filled(&matching));
-        assert!(!tracker.matches_order_filled(&non_matching));
-        assert!(!tracker.matches_order_filled(&short));
+        assert!(tracker.matches_token_event(&matching));
+        assert!(!tracker.matches_token_event(&non_matching));
+        assert!(!tracker.matches_token_event(&short));
     }
 
     #[test]
-    fn orders_matched_matching_and_short_payload() {
-        let tracker = ExchangeTracker::from_seed_csv(Some("0xdead")).expect("seed");
-
-        let matching = abi_words(&[0xdead, 0xbeef]);
-        let non_matching = abi_words(&[0x111, 0x222]);
-        let short = vec![0u8; 1];
-
-        assert!(tracker.matches_orders_matched(&matching));
-        assert!(!tracker.matches_orders_matched(&non_matching));
-        assert!(!tracker.matches_orders_matched(&short));
+    fn insert_token_id_decimal_normalizes_for_match() {
+        let mut tracker = ExchangeTracker::from_seed_csv(None).expect("empty");
+        tracker.insert_token_id_decimal("42").expect("insert");
+        let matching = abi_words(&[0, 42]);
+        assert!(tracker.matches_token_event(&matching));
     }
 }
