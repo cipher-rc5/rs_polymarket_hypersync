@@ -16,6 +16,8 @@ jobs:
 
       - name: Setup Rust 1.93
         uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
