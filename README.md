@@ -105,6 +105,15 @@ Runtime resilience / flow control:
 - `STREAM_RETRY_MAX_DELAY_MS` (default `10000`)
 - `PROGRESS_LOG_EVERY_BATCHES` (default `50`)
 
+HyperSync request-rate tuning (avoids server-side rate limiting; Envio's free
+tier allows 30 req/min):
+
+- `STREAM_CONCURRENCY` (default `2`; in-flight requests — the library default of
+  `10` exhausts the free-tier budget almost immediately)
+- `STREAM_BATCH_SIZE` (default `20000`; blocks per request — larger sweeps the
+  sparse Polymarket filters in fewer requests)
+- `STREAM_MAX_BATCH_SIZE` (default unset; optional hard cap on blocks per request)
+
 Filtering toggles:
 
 - `INCLUDE_NEG_RISK_LOGS` (`true`/`false`, default `true`)
@@ -257,6 +266,14 @@ just run-condition-seeded \
   - Check `ENVIO_HYPERSYNC_URL`, API token validity, and network reachability.
   - Increase `IO_TIMEOUT_MS` for slow networks.
   - Tune stream retry/backoff with `STREAM_RETRY_*` env vars.
+- HyperSync rate limiting (`WARN rate limited by server ... remaining=0/30`)
+  - The server budget (30 req/min on Envio's free tier) is exhausted. Lower
+    `STREAM_CONCURRENCY` (default `2`) and/or raise `STREAM_BATCH_SIZE`
+    (default `20000`) so each request covers more blocks.
+  - The client already sleeps proactively until the window resets, so this is a
+    throughput limit, not an error — upgrade at
+    <https://envio.dev/app/api-tokens> for higher limits, then raise
+    `STREAM_CONCURRENCY`.
 - RTDS reconnect storms
   - Verify `POLY_RTDS_URL` and TLS settings.
   - Keep `ENABLE_RTDS_STRICT_TLS=true` unless debugging in a controlled environment.
