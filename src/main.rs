@@ -21,13 +21,12 @@ use contracts::{
     topic::{
         CONDITION_RESOLUTION, NEG_RISK_PAYOUT_REDEMPTION, NEG_RISK_POSITION_SPLIT,
         NEG_RISK_POSITIONS_MERGE, ORDER_FILLED, ORDERS_MATCHED, PAYOUT_REDEMPTION, POSITION_SPLIT,
-        POSITIONS_MERGE, TOKEN_REGISTERED,
+        POSITIONS_MERGE,
     },
 };
 use enrich::{OffchainConfig, OffchainEnricher};
 use exchange::{
-    ExchangeTracker, decode_first_two_asset_ids_decimal, normalize_condition_id_word,
-    normalize_topic_word, parse_seed_env,
+    ExchangeTracker, decode_token_id_decimal, normalize_condition_id_word, parse_seed_env,
 };
 use matcher::{CtfTopicMatchers, ctf_matches_condition, normalize_hex, topic_contains_hex};
 use storage::{EventStore, StoredEvent};
@@ -52,6 +51,7 @@ async fn main() -> Result<()> {
     let seed_token_ids = parse_seed_env()?;
     let mut exchange_tracker = ExchangeTracker::from_seed_csv(seed_token_ids.as_deref())?;
     let mut event_store = EventStore::from_env()?;
+    let seed_was_provided = exchange_tracker.tracked_tokens_len() > 0;
 
     let mut client_builder = Client::builder().api_token(cfg.api_token.clone());
     if let Some(url) = &cfg.hypersync_url {
@@ -89,6 +89,32 @@ async fn main() -> Result<()> {
         if !meta.outcomes.is_empty() {
             info!(market_outcomes = %meta.outcomes, "market metadata");
         }
+        // V2 removed the on-chain `TokenRegistered` event, so we must seed
+        // the token-id tracker from gamma's `clobTokenIds` when the user did
+        // not supply an explicit `MARKET_TOKEN_IDS` CSV.
+        if !seed_was_provided {
+            for token_id in meta.parsed_clob_token_ids() {
+                if let Err(err) = exchange_tracker.insert_token_id_decimal(&token_id) {
+                    warn!(token_id = %token_id, error = %err, "failed seeding token id from gamma");
+                }
+            }
+            if exchange_tracker.tracked_tokens_len() > 0 {
+                info!(
+                    seeded_tokens = exchange_tracker.tracked_tokens_len(),
+                    "seeded token ids from gamma clobTokenIds"
+                );
+            } else {
+                warn!(
+                    "no token ids available for condition; OrderFilled/OrdersMatched matching will be empty. \
+                     Set MARKET_TOKEN_IDS or ensure gamma returns clobTokenIds for this condition."
+                );
+            }
+        }
+    } else if !seed_was_provided {
+        warn!(
+            "gamma did not return market metadata for condition; without MARKET_TOKEN_IDS, \
+             OrderFilled/OrdersMatched matching will be empty"
+        );
     }
 
     let (from_block, to_block_excl) = resolve_block_bounds(&cfg, &client).await?;
@@ -154,7 +180,6 @@ async fn main() -> Result<()> {
         payout_redemption_topic: normalize_hex(PAYOUT_REDEMPTION),
     };
 
-    let token_registered_topic = normalize_hex(TOKEN_REGISTERED);
     let order_filled_topic = normalize_hex(ORDER_FILLED);
     let orders_matched_topic = normalize_hex(ORDERS_MATCHED);
     let ctf_contract_hex = normalize_hex(CONDITIONAL_TOKENS);
@@ -178,12 +203,27 @@ async fn main() -> Result<()> {
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
+    // Tune the stream to stay within Envio's request budget. Low concurrency
+    // bounds in-flight requests; a large batch size sweeps this sparse filter in
+    // fewer requests. Both are env-overridable for higher-tier API plans.
+    let stream_config = StreamConfig {
+        concurrency: cfg.stream_tuning.concurrency,
+        batch_size: cfg.stream_tuning.batch_size,
+        max_batch_size: cfg.stream_tuning.max_batch_size,
+        ..StreamConfig::default()
+    };
+    info!(
+        concurrency = stream_config.concurrency,
+        batch_size = stream_config.batch_size,
+        "hypersync stream tuning"
+    );
+
     'stream_outer: loop {
         let query = build_query(next_from_block, to_block_excl, &cfg)?;
 
         let receiver = timeout(
             Duration::from_millis(cfg.io_timeout_ms),
-            client.stream(query, StreamConfig::default()),
+            client.stream(query, stream_config.clone()),
         )
         .await
         .context("timed out starting HyperSync stream")?
@@ -282,32 +322,26 @@ async fn main() -> Result<()> {
                                     } else if is_exchange {
                                         let topic0_hex = normalize_hex(&topic0);
 
-                                        if topic0_hex == token_registered_topic {
-                                            if normalize_topic_word(&topic3) != condition_id_word {
-                                                continue;
-                                            }
-                                            exchange_tracker.register_token_pair(&topic1, &topic2);
-
-                                            append_registered_ids_hint(&mut offchain_hint, &topic1, &topic2);
-
-                                            if offchain.config().enable_http {
-                                                enrich_token_pair_hint(&mut offchain_hint, &offchain, &topic1, &topic2)
-                                                    .await;
-                                            }
-                                        } else if topic0_hex == order_filled_topic {
+                                        if topic0_hex == order_filled_topic {
                                             if !cfg.include_order_filled
-                                                || !exchange_tracker.matches_order_filled(data)
+                                                || !exchange_tracker.matches_token_event(data)
                                             {
                                                 continue;
                                             }
-                                            append_asset_ids_hint(&mut offchain_hint, data);
+                                            append_token_id_hint(&mut offchain_hint, data);
+                                            if offchain.config().enable_http {
+                                                enrich_token_id_hint(&mut offchain_hint, &offchain, data).await;
+                                            }
                                         } else if topic0_hex == orders_matched_topic {
                                             if !cfg.include_orders_matched
-                                                || !exchange_tracker.matches_orders_matched(data)
+                                                || !exchange_tracker.matches_token_event(data)
                                             {
                                                 continue;
                                             }
-                                            append_asset_ids_hint(&mut offchain_hint, data);
+                                            append_token_id_hint(&mut offchain_hint, data);
+                                            if offchain.config().enable_http {
+                                                enrich_token_id_hint(&mut offchain_hint, &offchain, data).await;
+                                            }
                                         } else {
                                             continue;
                                         }
@@ -466,7 +500,7 @@ fn build_query(from_block: u64, to_block_excl: Option<u64>, cfg: &AppConfig) -> 
             NEG_RISK_PAYOUT_REDEMPTION,
         ])?;
 
-    let mut exchange_topics = vec![TOKEN_REGISTERED];
+    let mut exchange_topics: Vec<&str> = Vec::new();
     if cfg.include_order_filled {
         exchange_topics.push(ORDER_FILLED);
     }
@@ -474,9 +508,15 @@ fn build_query(from_block: u64, to_block_excl: Option<u64>, cfg: &AppConfig) -> 
         exchange_topics.push(ORDERS_MATCHED);
     }
 
-    let exchange_filter = LogFilter::all()
-        .and_address([EXCHANGE, NEG_RISK_EXCHANGE])?
-        .and_topic0(exchange_topics)?;
+    let exchange_filter = if exchange_topics.is_empty() {
+        None
+    } else {
+        Some(
+            LogFilter::all()
+                .and_address([EXCHANGE, NEG_RISK_EXCHANGE])?
+                .and_topic0(exchange_topics)?,
+        )
+    };
 
     let log_fields = [
         LogField::BlockNumber,
@@ -494,8 +534,10 @@ fn build_query(from_block: u64, to_block_excl: Option<u64>, cfg: &AppConfig) -> 
     if cfg.include_neg_risk_logs {
         query = query.where_logs(neg_risk_filter);
     }
-    if cfg.include_exchange_logs {
-        query = query.where_logs(exchange_filter);
+    if cfg.include_exchange_logs
+        && let Some(filter) = exchange_filter
+    {
+        query = query.where_logs(filter);
     }
     if let Some(v) = to_block_excl {
         query = query.to_block_excl(v);
@@ -503,59 +545,30 @@ fn build_query(from_block: u64, to_block_excl: Option<u64>, cfg: &AppConfig) -> 
     Ok(query.select_log_fields(log_fields))
 }
 
-async fn enrich_token_pair_hint(
+async fn enrich_token_id_hint(
     offchain_hint: &mut String,
     offchain: &OffchainEnricher,
-    token0_topic: &str,
-    token1_topic: &str,
+    data: &[u8],
 ) {
-    for (label, maybe_token_id) in [
-        (
-            "token0_price",
-            exchange::topic_u256_to_decimal(token0_topic),
-        ),
-        (
-            "token1_price",
-            exchange::topic_u256_to_decimal(token1_topic),
-        ),
-    ] {
-        if let Some(token_id) = maybe_token_id {
-            if let Some(price) = offchain.cached_last_trade_price(&token_id).await {
-                if !offchain_hint.is_empty() {
-                    offchain_hint.push(' ');
-                }
-                offchain_hint.push_str(&format!("{label}={price}"));
-            } else {
-                offchain.prefetch_last_trade_price(token_id);
-            }
+    let Some(token_id) = decode_token_id_decimal(data) else {
+        return;
+    };
+    if let Some(price) = offchain.cached_last_trade_price(&token_id).await {
+        if !offchain_hint.is_empty() {
+            offchain_hint.push(' ');
         }
+        offchain_hint.push_str(&format!("token_price={price}"));
+    } else {
+        offchain.prefetch_last_trade_price(token_id);
     }
 }
 
-fn append_registered_ids_hint(offchain_hint: &mut String, token0_topic: &str, token1_topic: &str) {
-    if let Some(token0_id) = exchange::topic_u256_to_decimal(token0_topic) {
+fn append_token_id_hint(offchain_hint: &mut String, data: &[u8]) {
+    if let Some(token_id) = decode_token_id_decimal(data) {
         if !offchain_hint.is_empty() {
             offchain_hint.push(' ');
         }
-        offchain_hint.push_str(&format!("token0_id={token0_id}"));
-    }
-
-    if let Some(token1_id) = exchange::topic_u256_to_decimal(token1_topic) {
-        if !offchain_hint.is_empty() {
-            offchain_hint.push(' ');
-        }
-        offchain_hint.push_str(&format!("token1_id={token1_id}"));
-    }
-}
-
-fn append_asset_ids_hint(offchain_hint: &mut String, data: &[u8]) {
-    if let Some((maker_asset_id, taker_asset_id)) = decode_first_two_asset_ids_decimal(data) {
-        if !offchain_hint.is_empty() {
-            offchain_hint.push(' ');
-        }
-        offchain_hint.push_str(&format!(
-            "maker_id={maker_asset_id} taker_id={taker_asset_id}"
-        ));
+        offchain_hint.push_str(&format!("token_id={token_id}"));
     }
 }
 

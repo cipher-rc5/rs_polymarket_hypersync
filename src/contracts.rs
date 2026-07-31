@@ -3,8 +3,8 @@ pub const DEFAULT_POLYGON_HYPERSYNC_URL: &str = "https://137.hypersync.xyz";
 
 pub mod address {
     pub const CONDITIONAL_TOKENS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
-    pub const EXCHANGE: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
-    pub const NEG_RISK_EXCHANGE: &str = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+    pub const EXCHANGE: &str = "0xE111180000d2663C0091e4f400237545B87B996B";
+    pub const NEG_RISK_EXCHANGE: &str = "0xe2222d279d744050d28e00520010520000310F59";
     pub const NEG_RISK_ADAPTER: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 }
 
@@ -25,10 +25,10 @@ pub mod topic {
     pub const NEG_RISK_PAYOUT_REDEMPTION: &str =
         "0x9140a6a270ef945260c03894b3c6b3b2695e9d5101feef0ff24fec960cfd3224";
 
-    pub const TOKEN_REGISTERED: &str =
-        "0xbc9a2432e8aeb48327246cddd6e872ef452812b4243c04e6bfb786a2cd8faf0d";
+    // CTF Exchange V2 — OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)
     pub const ORDER_FILLED: &str =
-        "0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6";
+        "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee";
+    // CTF Exchange V2 — OrdersMatched(bytes32,address,uint8,uint256,uint256,uint256)
     pub const ORDERS_MATCHED: &str =
-        "0x63bf4d16b7fa898ef4c4b2b6d90fd201e9c56313b65638af6088d149d2ce956c";
+        "0x174b3811690657c217184f89418266767c87e4805d09680c39fc9c031c0cab7c";
 }
